@@ -183,7 +183,20 @@ export default function PaymentsDashboard() {
           }
         }
 
-        setRows(cleaned);
+        // Compute unapplied per payment (collected - sum(applied across facilities))
+        const appliedByPayment = new Map();
+        for (const row of cleaned) {
+          const key = row.paymentId;
+          const applied = Number.isFinite(row.appliedAmount) ? row.appliedAmount : 0;
+          appliedByPayment.set(key, (appliedByPayment.get(key) || 0) + applied);
+        }
+        const withUnapplied = cleaned.map((row) => {
+          const totalApplied = appliedByPayment.get(row.paymentId) || 0;
+          const unapplied = row.paymentAmount - totalApplied;
+          return { ...row, unappliedAmount: Number.isFinite(unapplied) ? unapplied : 0 };
+        });
+
+        setRows(withUnapplied);
       },
       skipEmptyLines: true,
       error: (err) => alert("Parse error: " + (err && err.message ? err.message : String(err))),
@@ -268,6 +281,26 @@ export default function PaymentsDashboard() {
       .map(([facility, totalApplied]) => ({ facility, totalApplied }));
   }, [filtered]);
 
+  // Unapplied by payment id: collected minus sum(applied) across facilities for that payment
+  const unappliedByPayment = useMemo(() => {
+    const collectedByPid = new Map();
+    const appliedSumByPid = new Map();
+    const labelByPid = new Map(); // prefer payer label for tooltip
+    for (const r of filtered) {
+      const pid = r.paymentId;
+      if (!collectedByPid.has(pid)) collectedByPid.set(pid, r.paymentAmount);
+      appliedSumByPid.set(pid, (appliedSumByPid.get(pid) || 0) + (Number.isFinite(r.appliedAmount) ? r.appliedAmount : 0));
+      if (!labelByPid.has(pid)) labelByPid.set(pid, r.payer || "");
+    }
+    const out = [];
+    for (const [pid, collected] of collectedByPid.entries()) {
+      const applied = appliedSumByPid.get(pid) || 0;
+      const unapplied = collected - applied;
+      if (unapplied > 0.0001) out.push({ paymentId: pid, payer: labelByPid.get(pid) || "", unapplied });
+    }
+    return out.sort((a, b) => b.unapplied - a.unapplied).slice(0, 20);
+  }, [filtered]);
+
   const totalFiltered = filtered.reduce((sum, r) => sum + r.paymentAmount, 0);
   const totalCount = filtered.length;
   const avgPayment = totalCount > 0 ? totalFiltered / totalCount : 0;
@@ -341,6 +374,7 @@ export default function PaymentsDashboard() {
                     paymentAmount: r.paymentAmount,
                     facility: r.facility || "",
                     appliedAmount: Number.isFinite(r.appliedAmount) ? r.appliedAmount : 0,
+                    unappliedAmount: Number.isFinite(r.unappliedAmount) ? r.unappliedAmount : (r.paymentAmount - (Number.isFinite(r.appliedAmount) ? r.appliedAmount : 0)),
                     notes: r.notes
                   })),
                   "filtered_payments.csv"
@@ -846,6 +880,52 @@ export default function PaymentsDashboard() {
         </div>
 
         <div className={`shadow-sm border rounded-lg p-4 transition-colors ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className={`font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>Unapplied by payment</h2>
+            <div className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Top 20 transactions with remaining unapplied</div>
+          </div>
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={unappliedByPayment} margin={{ top: 10, right: 20, bottom: 60, left: 0 }}>
+                <defs>
+                  <linearGradient id="unappliedGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#f97316" stopOpacity={1} />
+                    <stop offset="100%" stopColor="#ea580c" stopOpacity={1} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? '#374151' : '#e5e7eb'} strokeOpacity={0.5} />
+                <XAxis
+                  dataKey="paymentId"
+                  interval={0}
+                  angle={-30}
+                  textAnchor="end"
+                  height={80}
+                  stroke={darkMode ? '#9ca3af' : '#6b7280'}
+                  tick={{ fontSize: 11, fontWeight: 500 }}
+                />
+                <YAxis
+                  stroke={darkMode ? '#9ca3af' : '#6b7280'}
+                  tick={{ fontSize: 12, fontWeight: 500 }}
+                  tickFormatter={(v) => `$${v.toLocaleString()}`}
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: darkMode ? '#1f2937' : '#ffffff',
+                    border: darkMode ? '1px solid #4b5563' : '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    boxShadow: darkMode ? '0 4px 6px rgba(0,0,0,0.3)' : '0 4px 6px rgba(0,0,0,0.1)'
+                  }}
+                  labelStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }}
+                  formatter={(value, name, props) => [`$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`, 'Unapplied']}
+                />
+                <Legend wrapperStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }} />
+                <Bar dataKey="unapplied" name="Unapplied" fill="url(#unappliedGradient)" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className={`shadow-sm border rounded-lg p-4 transition-colors ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
           <h2 className={`font-medium mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Filtered rows</h2>
           <div className={`overflow-auto border rounded-md max-h-96 ${darkMode ? 'border-gray-700' : 'border-gray-300'}`}>
             <table className="w-full text-sm">
@@ -860,6 +940,7 @@ export default function PaymentsDashboard() {
                   <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payment Date</th>
                   <th className={`text-right p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Amount</th>
                   <th className={`text-right p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Applied</th>
+                  <th className={`text-right p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Unapplied</th>
                   <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Notes</th>
                 </tr>
               </thead>
@@ -878,6 +959,7 @@ export default function PaymentsDashboard() {
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.paymentDate ? r.paymentDate.toISOString().slice(0, 10) : ""}</td>
                     <td className={`p-2 text-right ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.paymentAmount.toFixed(2)}</td>
                     <td className={`p-2 text-right ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{Number.isFinite(r.appliedAmount) ? r.appliedAmount.toFixed(2) : ""}</td>
+                    <td className={`p-2 text-right ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{Number.isFinite(r.unappliedAmount) ? r.unappliedAmount.toFixed(2) : ""}</td>
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.notes}</td>
                   </tr>
                 ))}
