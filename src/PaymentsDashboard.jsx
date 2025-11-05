@@ -250,11 +250,19 @@ export default function PaymentsDashboard() {
   const daily = useMemo(() => {
     const map = new Map();
     const countMap = new Map();
+    const seenPayments = new Map(); // Track which payment IDs we've already counted per date
+    
     for (const r of filtered) {
       if (!r.paymentDate) continue;
       const key = r.paymentDate.toISOString().slice(0, 10);
-      map.set(key, (map.get(key) || 0) + r.paymentAmount);
-      countMap.set(key, (countMap.get(key) || 0) + 1);
+      const paymentKey = `${key}-${r.paymentId}`;
+      
+      // Only count each payment ID once per day
+      if (!seenPayments.has(paymentKey)) {
+        seenPayments.set(paymentKey, true);
+        map.set(key, (map.get(key) || 0) + r.paymentAmount);
+        countMap.set(key, (countMap.get(key) || 0) + 1);
+      }
     }
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, total]) => ({ 
       date, 
@@ -266,9 +274,17 @@ export default function PaymentsDashboard() {
   const byType = useMemo(() => {
     const map = new Map();
     const countMap = new Map();
+    const seenPayments = new Map(); // Track which payment IDs we've already counted per type
+    
     for (const r of filtered) {
-      map.set(r.paymentType, (map.get(r.paymentType) || 0) + r.paymentAmount);
-      countMap.set(r.paymentType, (countMap.get(r.paymentType) || 0) + 1);
+      const paymentKey = `${r.paymentType}-${r.paymentId}`;
+      
+      // Only count each payment ID once per type
+      if (!seenPayments.has(paymentKey)) {
+        seenPayments.set(paymentKey, true);
+        map.set(r.paymentType, (map.get(r.paymentType) || 0) + r.paymentAmount);
+        countMap.set(r.paymentType, (countMap.get(r.paymentType) || 0) + 1);
+      }
     }
     return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).map(([type, total]) => ({ 
       type, 
@@ -280,9 +296,17 @@ export default function PaymentsDashboard() {
   const topPayers = useMemo(() => {
     const map = new Map();
     const countMap = new Map();
+    const seenPayments = new Map(); // Track which payment IDs we've already counted per payer
+    
     for (const r of filtered) {
-      map.set(r.payer, (map.get(r.payer) || 0) + r.paymentAmount);
-      countMap.set(r.payer, (countMap.get(r.payer) || 0) + 1);
+      const paymentKey = `${r.payer}-${r.paymentId}`;
+      
+      // Only count each payment ID once per payer
+      if (!seenPayments.has(paymentKey)) {
+        seenPayments.set(paymentKey, true);
+        map.set(r.payer, (map.get(r.payer) || 0) + r.paymentAmount);
+        countMap.set(r.payer, (countMap.get(r.payer) || 0) + 1);
+      }
     }
     return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([payer, total]) => ({ 
       payer, 
@@ -329,10 +353,40 @@ export default function PaymentsDashboard() {
     return out.sort((a, b) => b.unapplied - a.unapplied).slice(0, 20);
   }, [filtered]);
 
-  const totalPaymentsEntered = filtered.reduce((sum, r) => sum + r.paymentAmount, 0);
+  const totalPaymentsEntered = useMemo(() => {
+    const seenPayments = new Set();
+    return filtered.reduce((sum, r) => {
+      if (!seenPayments.has(r.paymentId)) {
+        seenPayments.add(r.paymentId);
+        return sum + r.paymentAmount;
+      }
+      return sum;
+    }, 0);
+  }, [filtered]);
+  
   const totalPaymentsApplied = filtered.reduce((sum, r) => sum + (Number.isFinite(r.appliedAmount) ? r.appliedAmount : 0), 0);
-  const totalUnappliedPayments = filtered.reduce((sum, r) => sum + (Number.isFinite(r.unappliedAmount) ? r.unappliedAmount : 0), 0);
-  const totalCount = filtered.length;
+  
+  const totalUnappliedPayments = useMemo(() => {
+    const seenPayments = new Set();
+    return filtered.reduce((sum, r) => {
+      if (!seenPayments.has(r.paymentId)) {
+        seenPayments.add(r.paymentId);
+        return sum + (Number.isFinite(r.unappliedAmount) ? r.unappliedAmount : 0);
+      }
+      return sum;
+    }, 0);
+  }, [filtered]);
+  
+  const totalCount = useMemo(() => {
+    const seenPayments = new Set();
+    return filtered.reduce((count, r) => {
+      if (!seenPayments.has(r.paymentId)) {
+        seenPayments.add(r.paymentId);
+        return count + 1;
+      }
+      return count;
+    }, 0);
+  }, [filtered]);
 
   // Additional metrics
   const uniquePayersCount = useMemo(() => {
