@@ -67,7 +67,7 @@ function normalizeFacility(s) {
 export default function PaymentsDashboard() {
   const [rows, setRows] = useState([]);
   const [search, setSearch] = useState("");
-  const [payerCategory, setPayerCategory] = useState("all");
+  const [payerFilter, setPayerFilter] = useState([]);
   const [paymentTypes, setPaymentTypes] = useState([]);
   const [facilityFilter, setFacilityFilter] = useState([]); // holds normalized facility keys
   const [minAmt, setMinAmt] = useState("");
@@ -203,9 +203,9 @@ export default function PaymentsDashboard() {
     });
   };
 
-  const uniqueCategories = useMemo(() => {
-    const s = new Set(rows.map((r) => r.payerCategory).filter(Boolean));
-    return ["all", ...Array.from(s)];
+  const uniquePayers = useMemo(() => {
+    const s = new Set(rows.map((r) => r.payer).filter(Boolean));
+    return Array.from(s).sort();
   }, [rows]);
 
   const uniqueTypes = useMemo(() => {
@@ -233,52 +233,80 @@ export default function PaymentsDashboard() {
     const to = toDateFilter ? new Date(toDateFilter + "T23:59:59") : null;
 
     return rows.filter((r) => {
-      if (payerCategory !== "all" && r.payerCategory !== payerCategory) return false;
+      if (payerFilter.length && !payerFilter.includes(r.payer)) return false;
       if (paymentTypes.length && !paymentTypes.includes(r.paymentType)) return false;
 
       // ✅ robust facility filter using normalized key
       if (facilityFilter.length && !facilityFilter.includes(r.facilityNorm)) return false;
 
       if (r.paymentAmount < min || r.paymentAmount > max) return false;
-      if (q && !(r.payer.toLowerCase().includes(q) || r.notes.toLowerCase().includes(q))) return false;
-      if (from && r.paymentDate && r.paymentDate < from) return false;
-      if (to && r.paymentDate && r.paymentDate > to) return false;
+      if (q && !(String(r.payer || "").toLowerCase().includes(q) || String(r.notes || "").toLowerCase().includes(q))) return false;
+      if (from && r.dateEntered && r.dateEntered < from) return false;
+      if (to && r.dateEntered && r.dateEntered > to) return false;
       return true;
     });
-  }, [rows, payerCategory, paymentTypes, facilityFilter, minAmt, maxAmt, search, fromDate, toDateFilter]);
+  }, [rows, payerFilter, paymentTypes, facilityFilter, minAmt, maxAmt, search, fromDate, toDateFilter]);
 
   const daily = useMemo(() => {
     const map = new Map();
+    const countMap = new Map();
     for (const r of filtered) {
       if (!r.paymentDate) continue;
       const key = r.paymentDate.toISOString().slice(0, 10);
       map.set(key, (map.get(key) || 0) + r.paymentAmount);
+      countMap.set(key, (countMap.get(key) || 0) + 1);
     }
-    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, total]) => ({ date, total }));
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, total]) => ({ 
+      date, 
+      total, 
+      count: countMap.get(date) || 0 
+    }));
   }, [filtered]);
 
   const byType = useMemo(() => {
     const map = new Map();
-    for (const r of filtered) map.set(r.paymentType, (map.get(r.paymentType) || 0) + r.paymentAmount);
-    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).map(([type, total]) => ({ type, total }));
+    const countMap = new Map();
+    for (const r of filtered) {
+      map.set(r.paymentType, (map.get(r.paymentType) || 0) + r.paymentAmount);
+      countMap.set(r.paymentType, (countMap.get(r.paymentType) || 0) + 1);
+    }
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).map(([type, total]) => ({ 
+      type, 
+      total, 
+      count: countMap.get(type) || 0 
+    }));
   }, [filtered]);
 
   const topPayers = useMemo(() => {
     const map = new Map();
-    for (const r of filtered) map.set(r.payer, (map.get(r.payer) || 0) + r.paymentAmount);
-    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([payer, total]) => ({ payer, total }));
+    const countMap = new Map();
+    for (const r of filtered) {
+      map.set(r.payer, (map.get(r.payer) || 0) + r.paymentAmount);
+      countMap.set(r.payer, (countMap.get(r.payer) || 0) + 1);
+    }
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([payer, total]) => ({ 
+      payer, 
+      total, 
+      count: countMap.get(payer) || 0 
+    }));
   }, [filtered]);
 
   // Applied totals by facility (this is the key facility view)
   const byFacilityApplied = useMemo(() => {
     const map = new Map();
+    const countMap = new Map();
     for (const r of filtered) {
       const key = r.facility || "Unspecified";
       map.set(key, (map.get(key) || 0) + (Number.isFinite(r.appliedAmount) ? r.appliedAmount : 0));
+      countMap.set(key, (countMap.get(key) || 0) + 1);
     }
     return Array.from(map.entries())
       .sort((a, b) => b[1] - a[1])
-      .map(([facility, totalApplied]) => ({ facility, totalApplied }));
+      .map(([facility, totalApplied]) => ({ 
+        facility, 
+        totalApplied, 
+        count: countMap.get(facility) || 0 
+      }));
   }, [filtered]);
 
   // Unapplied by payment id: collected minus sum(applied) across facilities for that payment
@@ -301,9 +329,10 @@ export default function PaymentsDashboard() {
     return out.sort((a, b) => b.unapplied - a.unapplied).slice(0, 20);
   }, [filtered]);
 
-  const totalFiltered = filtered.reduce((sum, r) => sum + r.paymentAmount, 0);
+  const totalPaymentsEntered = filtered.reduce((sum, r) => sum + r.paymentAmount, 0);
+  const totalPaymentsApplied = filtered.reduce((sum, r) => sum + (Number.isFinite(r.appliedAmount) ? r.appliedAmount : 0), 0);
+  const totalUnappliedPayments = filtered.reduce((sum, r) => sum + (Number.isFinite(r.unappliedAmount) ? r.unappliedAmount : 0), 0);
   const totalCount = filtered.length;
-  const avgPayment = totalCount > 0 ? totalFiltered / totalCount : 0;
 
   // Additional metrics
   const uniquePayersCount = useMemo(() => {
@@ -486,7 +515,7 @@ export default function PaymentsDashboard() {
                 </div>
 
                 <div className="space-y-3">
-                  <label className={`block text-sm font-semibold tracking-wide ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>From date</label>
+                  <label className={`block text-sm font-semibold tracking-wide ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>From Date Entered</label>
                   <input
                     type="date"
                     className={`border rounded-lg p-2.5 w-full transition-all focus:ring-2 focus:outline-none font-medium ${darkMode
@@ -496,7 +525,7 @@ export default function PaymentsDashboard() {
                     value={fromDate}
                     onChange={(e) => setFromDate(e.target.value)}
                   />
-                  <label className={`block text-sm font-semibold mt-2 tracking-wide ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>To date</label>
+                  <label className={`block text-sm font-semibold mt-2 tracking-wide ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>To Date Entered</label>
                   <input
                     type="date"
                     className={`border rounded-lg p-2.5 w-full transition-all focus:ring-2 focus:outline-none font-medium ${darkMode
@@ -509,19 +538,24 @@ export default function PaymentsDashboard() {
                 </div>
 
                 <div className="space-y-3">
-                  <label className={`block text-sm font-semibold tracking-wide ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Payer category</label>
-                  <select
-                    className={`border rounded-lg p-2.5 w-full transition-all focus:ring-2 focus:outline-none font-medium ${darkMode
-                      ? 'bg-gray-700/50 border-gray-600 text-white focus:border-blue-500 focus:ring-blue-500/20'
-                      : 'bg-white border-gray-300 focus:border-blue-500 focus:ring-blue-500/20'
-                      }`}
-                    value={payerCategory}
-                    onChange={(e) => setPayerCategory(e.target.value)}
-                  >
-                    {uniqueCategories.map((c) => (
-                      <option key={c} value={c}>{c}</option>
+                  <label className={`block text-sm font-semibold tracking-wide ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Payer</label>
+                  <div className={`max-h-56 overflow-auto rounded-xl border p-3 transition-all ${darkMode ? 'bg-gray-700/50 border-gray-600' : 'bg-white border-gray-300'}`}>
+                    {uniquePayers.map((p) => (
+                      <label key={p} className={`flex items-center gap-2 py-1 text-sm ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                        <input
+                          type="checkbox"
+                          checked={payerFilter.includes(p)}
+                          onChange={(e) => {
+                            const v = e.target.checked;
+                            setPayerFilter((prev) => (v ? [...prev, p] : prev.filter((x) => x !== p)));
+                          }}
+                          className="rounded"
+                        />
+                        <span>{p}</span>
+                      </label>
                     ))}
-                  </select>
+                    {uniquePayers.length === 0 && <div className={`text-sm ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>Upload a CSV to see payers</div>}
+                  </div>
 
                   <label className={`block text-sm font-semibold mt-2 tracking-wide ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Search payer/notes</label>
                   <input
@@ -622,8 +656,8 @@ export default function PaymentsDashboard() {
                     </svg>
                   </div>
                   <div className="ml-4">
-                    <p className={`text-sm font-medium ${darkMode ? 'text-blue-300' : 'text-blue-900'}`}>Total Payments</p>
-                    <p className={`text-2xl font-semibold ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>${totalFiltered.toFixed(2)}</p>
+                    <p className={`text-sm font-medium ${darkMode ? 'text-blue-300' : 'text-blue-900'}`}>Total Payments Entered</p>
+                    <p className={`text-2xl font-semibold ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>${totalPaymentsEntered.toFixed(2)}</p>
                   </div>
                 </div>
               </div>
@@ -632,33 +666,33 @@ export default function PaymentsDashboard() {
                 <div className="flex items-center">
                   <div className="flex-shrink-0">
                     <svg className={`h-8 w-8 ${darkMode ? 'text-green-400' : 'text-green-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
                   <div className="ml-4">
-                    <p className={`text-sm font-medium ${darkMode ? 'text-green-300' : 'text-green-900'}`}>Transaction Count</p>
-                    <p className={`text-2xl font-semibold ${darkMode ? 'text-green-400' : 'text-green-600'}`}>{totalCount}</p>
+                    <p className={`text-sm font-medium ${darkMode ? 'text-green-300' : 'text-green-900'}`}>Total Payments Applied</p>
+                    <p className={`text-2xl font-semibold ${darkMode ? 'text-green-400' : 'text-green-600'}`}>${totalPaymentsApplied.toFixed(2)}</p>
                   </div>
                 </div>
               </div>
 
-              <div className={`rounded-lg p-4 transition-colors ${darkMode ? 'bg-purple-900/30 border-purple-700' : 'bg-purple-50 border-purple-200'} border`}>
+              <div className={`rounded-lg p-4 transition-colors ${darkMode ? 'bg-orange-900/30 border-orange-700' : 'bg-orange-50 border-orange-200'} border`}>
                 <div className="flex items-center">
                   <div className="flex-shrink-0">
-                    <svg className={`h-8 w-8 ${darkMode ? 'text-purple-400' : 'text-purple-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                    <svg className={`h-8 w-8 ${darkMode ? 'text-orange-400' : 'text-orange-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
                   <div className="ml-4">
-                    <p className={`text-sm font-medium ${darkMode ? 'text-purple-300' : 'text-purple-900'}`}>Average Payment</p>
-                    <p className={`text-2xl font-semibold ${darkMode ? 'text-purple-400' : 'text-purple-600'}`}>${avgPayment.toFixed(2)}</p>
+                    <p className={`text-sm font-medium ${darkMode ? 'text-orange-300' : 'text-orange-900'}`}>Total Unapplied Payments</p>
+                    <p className={`text-2xl font-semibold ${darkMode ? 'text-orange-400' : 'text-orange-600'}`}>${totalUnappliedPayments.toFixed(2)}</p>
                   </div>
                 </div>
               </div>
             </div>
 
             {filtered.length > 0 && (
-              <div className={`grid grid-cols-1 md:grid-cols-5 gap-3 shadow-sm border rounded-lg p-4 transition-colors ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+              <div className={`grid grid-cols-1 md:grid-cols-4 gap-3 shadow-sm border rounded-lg p-4 transition-colors ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
                 <div className={`rounded-lg p-3 border transition-colors ${darkMode ? 'bg-gray-700/50 border-gray-600' : 'bg-yellow-50 border-yellow-200'}`}>
                   <p className={`text-xs font-medium ${darkMode ? 'text-yellow-300' : 'text-yellow-800'}`}>Unique Payers</p>
                   <p className={`text-xl font-bold ${darkMode ? 'text-yellow-400' : 'text-yellow-600'}`}>{uniquePayersCount}</p>
@@ -676,15 +710,9 @@ export default function PaymentsDashboard() {
                   </p>
                 </div>
                 <div className={`rounded-lg p-3 border transition-colors ${darkMode ? 'bg-gray-700/50 border-gray-600' : 'bg-cyan-50 border-cyan-200'}`}>
-                  <p className={`text-xs font-medium ${darkMode ? 'text-cyan-300' : 'text-cyan-800'}`}>Date Range</p>
+                  <p className={`text-xs font-medium ${darkMode ? 'text-cyan-300' : 'text-cyan-800'}`}>Payment Date Range</p>
                   <p className={`text-xs font-bold ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`}>
                     {dateRange ? `${dateRange.count} days` : 'N/A'}
-                  </p>
-                </div>
-                <div className={`rounded-lg p-3 border transition-colors ${darkMode ? 'bg-gray-700/50 border-gray-600' : 'bg-orange-50 border-orange-200'}`}>
-                  <p className={`text-xs font-medium ${darkMode ? 'text-orange-300' : 'text-orange-800'}`}>Total by Type</p>
-                  <p className={`text-xs font-bold ${darkMode ? 'text-orange-400' : 'text-orange-600'}`}>
-                    {byType.length} types
                   </p>
                 </div>
               </div>
@@ -731,6 +759,10 @@ export default function PaymentsDashboard() {
                       boxShadow: darkMode ? '0 4px 6px rgba(0, 0, 0, 0.3)' : '0 4px 6px rgba(0, 0, 0, 0.1)'
                     }}
                     labelStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }}
+                    formatter={(value, name, props) => [
+                      `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })} (${props.payload.count} transactions)`,
+                      name
+                    ]}
                   />
                   <Legend wrapperStyle={{ color: darkMode ? '#d1d5db' : ' #111827', fontWeight: 600 }} />
                   <Line
@@ -781,6 +813,10 @@ export default function PaymentsDashboard() {
                       boxShadow: darkMode ? '0 4px 6px rgba(0, 0, 0, 0.3)' : '0 4px 6px rgba(0, 0, 0, 0.1)'
                     }}
                     labelStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }}
+                    formatter={(value, name, props) => [
+                      `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })} (${props.payload.count} transactions)`,
+                      name
+                    ]}
                   />
                   <Legend wrapperStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }} />
                   <Bar
@@ -832,6 +868,10 @@ export default function PaymentsDashboard() {
                     boxShadow: darkMode ? '0 4px 6px rgba(0, 0, 0, 0.3)' : '0 4px 6px rgba(0, 0, 0, 0.1)'
                   }}
                   labelStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }}
+                  formatter={(value, name, props) => [
+                    `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })} (${props.payload.count} transactions)`,
+                    name
+                  ]}
                 />
                 <Legend wrapperStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }} />
                 <Bar
@@ -871,7 +911,10 @@ export default function PaymentsDashboard() {
                   boxShadow: darkMode ? '0 4px 6px rgba(0,0,0,0.3)' : '0 4px 6px rgba(0,0,0,0.1)'
                 }}
                   labelStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }}
-                  formatter={(value) => [`$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`, "Applied"]} />
+                  formatter={(value, name, props) => [
+                    `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })} (${props.payload.count} transactions)`,
+                    "Applied"
+                  ]} />
                 <Legend wrapperStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }} />
                 <Bar dataKey="totalApplied" name="Applied" fill="url(#facilityAppliedGradient)" radius={[6, 6, 0, 0]} />
               </BarChart>
@@ -884,44 +927,35 @@ export default function PaymentsDashboard() {
             <h2 className={`font-medium ${darkMode ? 'text-white' : 'text-gray-900'}`}>Unapplied by payment</h2>
             <div className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Top 20 transactions with remaining unapplied</div>
           </div>
-          <div className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={unappliedByPayment} margin={{ top: 10, right: 20, bottom: 60, left: 0 }}>
-                <defs>
-                  <linearGradient id="unappliedGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#f97316" stopOpacity={1} />
-                    <stop offset="100%" stopColor="#ea580c" stopOpacity={1} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? '#374151' : '#e5e7eb'} strokeOpacity={0.5} />
-                <XAxis
-                  dataKey="paymentId"
-                  interval={0}
-                  angle={-30}
-                  textAnchor="end"
-                  height={80}
-                  stroke={darkMode ? '#9ca3af' : '#6b7280'}
-                  tick={{ fontSize: 11, fontWeight: 500 }}
-                />
-                <YAxis
-                  stroke={darkMode ? '#9ca3af' : '#6b7280'}
-                  tick={{ fontSize: 12, fontWeight: 500 }}
-                  tickFormatter={(v) => `$${v.toLocaleString()}`}
-                />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: darkMode ? '#1f2937' : '#ffffff',
-                    border: darkMode ? '1px solid #4b5563' : '1px solid #e5e7eb',
-                    borderRadius: '8px',
-                    boxShadow: darkMode ? '0 4px 6px rgba(0,0,0,0.3)' : '0 4px 6px rgba(0,0,0,0.1)'
-                  }}
-                  labelStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }}
-                  formatter={(value, name, props) => [`$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`, 'Unapplied']}
-                />
-                <Legend wrapperStyle={{ color: darkMode ? '#d1d5db' : '#111827', fontWeight: 600 }} />
-                <Bar dataKey="unapplied" name="Unapplied" fill="url(#unappliedGradient)" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className={`overflow-auto border rounded-md max-h-96 ${darkMode ? 'border-gray-700' : 'border-gray-300'}`}>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className={`${darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                  <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payment ID</th>
+                  <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payer</th>
+                  <th className={`text-right p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Unapplied Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {unappliedByPayment.map((item) => (
+                  <tr
+                    key={item.paymentId}
+                    className={`${darkMode ? 'border-gray-700' : 'border-gray-200'} border-t hover:bg-opacity-50 ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-50'}`}
+                  >
+                    <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{item.paymentId}</td>
+                    <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{item.payer}</td>
+                    <td className={`p-2 text-right font-semibold ${darkMode ? 'text-orange-400' : 'text-orange-600'}`}>
+                      ${item.unapplied.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+                {unappliedByPayment.length === 0 && (
+                  <tr>
+                    <td colSpan="3" className={`p-4 text-center ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>No unapplied payments found.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -947,7 +981,7 @@ export default function PaymentsDashboard() {
               <tbody>
                 {filtered.map((r, idx) => (
                   <tr
-                    key={r.paymentId}
+                    key={`${r.paymentId}-${r.facility}-${idx}`}
                     className={`${darkMode ? 'border-gray-700' : 'border-gray-200'} border-t hover:bg-opacity-50 ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-50'}`}
                   >
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.paymentId}</td>
@@ -965,7 +999,7 @@ export default function PaymentsDashboard() {
                 ))}
                 {filtered.length === 0 && (
                   <tr>
-                    <td colSpan="8" className={`p-4 text-center ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>No rows match your filters.</td>
+                    <td colSpan="11" className={`p-4 text-center ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>No rows match your filters.</td>
                   </tr>
                 )}
               </tbody>
