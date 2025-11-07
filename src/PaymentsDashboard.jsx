@@ -14,7 +14,9 @@ function parseMoney(v) {
 function detectHeaderRow(rows) {
   for (let i = 0; i < Math.min(30, rows.length); i++) {
     const row = rows[i] || [];
-    if (row.some((c) => String(c || "").toLowerCase().includes("payment id"))) return i;
+    const rowLower = row.map((c) => String(c || "").toLowerCase());
+    // Check for both "payment id" (Format 1) and "paymentid" (Format 2)
+    if (rowLower.some((c) => c.includes("payment id") || c.includes("paymentid"))) return i;
   }
   return 0; // fallback
 }
@@ -78,6 +80,8 @@ export default function PaymentsDashboard() {
   const [isDragging, setIsDragging] = useState(false);
   const [isFiltersOpen, setIsFiltersOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
+  const [sortBy, setSortBy] = useState(null); // 'paymentId' | 'paymentDate' | 'dateEntered' | null
+  const [sortDirection, setSortDirection] = useState('asc'); // 'asc' | 'desc'
   const fileInputRef = useRef(null);
 
   const handleFile = (file) => {
@@ -96,90 +100,139 @@ export default function PaymentsDashboard() {
         const dataRows = arrayRows.slice(headerRowIdx + 1);
         const idx = (name) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase());
 
-        const iPaymentId = idx("Payment ID");
-        const iPayerName = idx("Payer Name");
-        const iPaymentType = idx("Payment Type");
-        const iCheck = idx("Check #");
-        const iDateEntered = idx("Date Entered");
-        const iPaymentDate = idx("Payment Date");
-        const iPayment = idx("Payment");
-        const iNotes = idx("Notes");
+        // Detect format: Format 2 has "payercategory" field (distinguishing feature), Format 1 has "Payer Name" (combined)
+        const headerLower = header.map(h => h.toLowerCase());
+        const hasPayerCategory = headerLower.some(h => h.includes("payercategory"));
+        const hasPayerName = headerLower.some(h => h.includes("payer name"));
+        const isFormat2 = hasPayerCategory || (!hasPayerName && headerLower.some(h => h.replace(/\s+/g, "") === "paymentid"));
+        
+        let cleaned = [];
 
-        const cleaned = [];
+        if (isFormat2) {
+          // Format 2: filtered_payments.csv - Simple format with already separated fields
+          // May include facility, appliedAmount, unappliedAmount if exported from this app
+          const iPaymentId = idx("paymentId");
+          const iPayerCategory = idx("payerCategory");
+          const iPayer = idx("payer");
+          const iPaymentType = idx("paymentType");
+          const iCheck = idx("checkNumber");
+          const iDateEntered = idx("dateEntered");
+          const iPaymentDate = idx("paymentDate");
+          const iPaymentAmount = idx("paymentAmount");
+          const iNotes = idx("notes");
+          const iFacility = idx("facility");
+          const iAppliedAmount = idx("appliedAmount");
+          const iUnappliedAmount = idx("unappliedAmount");
 
-        // Iterate through rows; for each payment, attach following Facility/Applied blocks
-        for (let i = 0; i < dataRows.length; i++) {
-          const r = dataRows[i] || [];
-          const pid = r[iPaymentId];
-          const paymentLabel = (r[iPayment] ?? "").toString();
-          if (!pid || String(pid).toLowerCase() === "payment id") continue;
-          if (paymentLabel && /total/i.test(paymentLabel)) continue;
-          if (!/^\d+$/.test(String(pid))) continue;
+          for (let i = 0; i < dataRows.length; i++) {
+            const r = dataRows[i] || [];
+            const pid = r[iPaymentId];
+            if (!pid || String(pid).toLowerCase() === "paymentid") continue;
+            if (!/^\d+$/.test(String(pid))) continue;
 
-          const { payerCategory: cat, payer } = splitPayer(r[iPayerName]);
-          const base = {
-            paymentId: String(pid),
-            payerCategory: cat || "",
-            payer: payer || "",
-            paymentType: (r[iPaymentType] || "Unknown").toString(),
-            checkNumber: r[iCheck] || "",
-            dateEntered: toDate(r[iDateEntered]),
-            paymentDate: toDate(r[iPaymentDate]),
-            paymentAmount: parseMoney(r[iPayment]),
-            notes: r[iNotes] || "",
-          };
-
-          // Look ahead for a "Facility / Applied" header row, then capture the next value rows
-          let j = i + 1;
-          let foundFacilityBlock = false;
-          while (j < dataRows.length) {
-            const row = dataRows[j] || [];
-            const joinedLower = row.map((c) => String(c || "").trim().toLowerCase());
-            // Stop when we hit the next payment section header or a new payment row
-            if (joinedLower.includes("payment id") || (/^\d+$/.test(String(row[iPaymentId] || "")))) break;
-
-            // Detect the inline Facility/Applied header row
-            const facilityHeaderIdx = joinedLower.indexOf("facility");
-            const appliedHeaderIdx = joinedLower.indexOf("applied");
-            if (facilityHeaderIdx !== -1 && appliedHeaderIdx !== -1) {
-              // Following rows until a blank-seeming line or next section: capture facility/applied
-              let k = j + 1;
-              while (k < dataRows.length) {
-                const valRow = dataRows[k] || [];
-                const valLower = valRow.map((c) => String(c || "").trim().toLowerCase());
-                if (valLower.includes("facility total:")) { k++; continue; }
-                // break when we reach an empty separator or next section
-                const isSeparator = valLower.every((c) => c === "");
-                if (isSeparator) { k++; continue; }
-                if (valLower.includes("payment id") || (/^\d+$/.test(String(valRow[iPaymentId] || "")))) break;
-
-                const facilityVal = valRow[facilityHeaderIdx];
-                const appliedVal = valRow[appliedHeaderIdx];
-                if (facilityVal) {
-                  foundFacilityBlock = true;
-                  cleaned.push({
-                    ...base,
-                    facility: String(facilityVal),
-                    facilityNorm: normalizeFacility(facilityVal),
-                    appliedAmount: parseMoney(appliedVal),
-                  });
-                }
-                k++;
-              }
-              j = k;
-              break;
-            }
-            j++;
-          }
-
-          // If no facility block found, still emit the base row without facility
-          if (!foundFacilityBlock) {
+            const facilityVal = iFacility >= 0 ? (r[iFacility] || "").toString().trim() : "";
+            const appliedVal = iAppliedAmount >= 0 ? parseMoney(r[iAppliedAmount]) : 0;
+            
             cleaned.push({
-              ...base,
-              facility: "",
-              facilityNorm: "",
-              appliedAmount: 0,
+              paymentId: String(pid),
+              payerCategory: (r[iPayerCategory] || "").toString().trim(),
+              payer: (r[iPayer] || "").toString().trim(),
+              paymentType: (r[iPaymentType] || "Unknown").toString(),
+              checkNumber: (r[iCheck] || "").toString(),
+              dateEntered: toDate(r[iDateEntered]),
+              paymentDate: toDate(r[iPaymentDate]),
+              paymentAmount: parseMoney(r[iPaymentAmount]),
+              notes: (r[iNotes] || "").toString(),
+              facility: facilityVal,
+              facilityNorm: facilityVal ? normalizeFacility(facilityVal) : "",
+              appliedAmount: Number.isFinite(appliedVal) ? appliedVal : 0,
             });
+          }
+        } else {
+          // Format 1: Collected Payments format - Has facility/applied blocks
+          const iPaymentId = idx("Payment ID");
+          const iPayerName = idx("Payer Name");
+          const iPaymentType = idx("Payment Type");
+          const iCheck = idx("Check #");
+          const iDateEntered = idx("Date Entered");
+          const iPaymentDate = idx("Payment Date");
+          const iPayment = idx("Payment");
+          const iNotes = idx("Notes");
+
+          // Iterate through rows; for each payment, attach following Facility/Applied blocks
+          for (let i = 0; i < dataRows.length; i++) {
+            const r = dataRows[i] || [];
+            const pid = r[iPaymentId];
+            const paymentLabel = (r[iPayment] ?? "").toString();
+            if (!pid || String(pid).toLowerCase() === "payment id") continue;
+            if (paymentLabel && /total/i.test(paymentLabel)) continue;
+            if (!/^\d+$/.test(String(pid))) continue;
+
+            const { payerCategory: cat, payer } = splitPayer(r[iPayerName]);
+            const base = {
+              paymentId: String(pid),
+              payerCategory: cat || "",
+              payer: payer || "",
+              paymentType: (r[iPaymentType] || "Unknown").toString(),
+              checkNumber: r[iCheck] || "",
+              dateEntered: toDate(r[iDateEntered]),
+              paymentDate: toDate(r[iPaymentDate]),
+              paymentAmount: parseMoney(r[iPayment]),
+              notes: r[iNotes] || "",
+            };
+
+            // Look ahead for a "Facility / Applied" header row, then capture the next value rows
+            let j = i + 1;
+            let foundFacilityBlock = false;
+            while (j < dataRows.length) {
+              const row = dataRows[j] || [];
+              const joinedLower = row.map((c) => String(c || "").trim().toLowerCase());
+              // Stop when we hit the next payment section header or a new payment row
+              if (joinedLower.includes("payment id") || (/^\d+$/.test(String(row[iPaymentId] || "")))) break;
+
+              // Detect the inline Facility/Applied header row
+              const facilityHeaderIdx = joinedLower.indexOf("facility");
+              const appliedHeaderIdx = joinedLower.indexOf("applied");
+              if (facilityHeaderIdx !== -1 && appliedHeaderIdx !== -1) {
+                // Following rows until a blank-seeming line or next section: capture facility/applied
+                let k = j + 1;
+                while (k < dataRows.length) {
+                  const valRow = dataRows[k] || [];
+                  const valLower = valRow.map((c) => String(c || "").trim().toLowerCase());
+                  if (valLower.includes("facility total:")) { k++; continue; }
+                  // break when we reach an empty separator or next section
+                  const isSeparator = valLower.every((c) => c === "");
+                  if (isSeparator) { k++; continue; }
+                  if (valLower.includes("payment id") || (/^\d+$/.test(String(valRow[iPaymentId] || "")))) break;
+
+                  const facilityVal = valRow[facilityHeaderIdx];
+                  const appliedVal = valRow[appliedHeaderIdx];
+                  if (facilityVal) {
+                    foundFacilityBlock = true;
+                    cleaned.push({
+                      ...base,
+                      facility: String(facilityVal),
+                      facilityNorm: normalizeFacility(facilityVal),
+                      appliedAmount: parseMoney(appliedVal),
+                    });
+                  }
+                  k++;
+                }
+                j = k;
+                break;
+              }
+              j++;
+            }
+
+            // If no facility block found, still emit the base row without facility
+            if (!foundFacilityBlock) {
+              cleaned.push({
+                ...base,
+                facility: "",
+                facilityNorm: "",
+                appliedAmount: 0,
+              });
+            }
           }
         }
 
@@ -247,14 +300,52 @@ export default function PaymentsDashboard() {
     });
   }, [rows, payerFilter, paymentTypes, facilityFilter, minAmt, maxAmt, search, fromDate, toDateFilter]);
 
+  const handleSort = (column) => {
+    if (sortBy === column) {
+      // Toggle direction if clicking the same column
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      // Set new column and default to ascending
+      setSortBy(column);
+      setSortDirection('asc');
+    }
+  };
+
+  const sortedFiltered = useMemo(() => {
+    if (!sortBy) return filtered;
+    
+    const sorted = [...filtered].sort((a, b) => {
+      let aVal, bVal;
+      
+      if (sortBy === 'paymentId') {
+        aVal = parseInt(a.paymentId) || 0;
+        bVal = parseInt(b.paymentId) || 0;
+      } else if (sortBy === 'paymentDate') {
+        aVal = a.paymentDate ? a.paymentDate.getTime() : 0;
+        bVal = b.paymentDate ? b.paymentDate.getTime() : 0;
+      } else if (sortBy === 'dateEntered') {
+        aVal = a.dateEntered ? a.dateEntered.getTime() : 0;
+        bVal = b.dateEntered ? b.dateEntered.getTime() : 0;
+      } else {
+        return 0;
+      }
+      
+      if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
+      return 0;
+    });
+    
+    return sorted;
+  }, [filtered, sortBy, sortDirection]);
+
   const daily = useMemo(() => {
     const map = new Map();
     const countMap = new Map();
     const seenPayments = new Map(); // Track which payment IDs we've already counted per date
     
     for (const r of filtered) {
-      if (!r.paymentDate) continue;
-      const key = r.paymentDate.toISOString().slice(0, 10);
+      if (!r.dateEntered) continue;
+      const key = r.dateEntered.toISOString().slice(0, 10);
       const paymentKey = `${key}-${r.paymentId}`;
       
       // Only count each payment ID once per day
@@ -396,7 +487,7 @@ export default function PaymentsDashboard() {
 
   const dateRange = useMemo(() => {
     const dates = filtered
-      .map((r) => r.paymentDate)
+      .map((r) => r.dateEntered)
       .filter((d) => d != null)
       .map((d) => d.getTime())
       .sort((a, b) => a - b);
@@ -453,6 +544,7 @@ export default function PaymentsDashboard() {
                     payer: r.payer,
                     paymentType: r.paymentType,
                     checkNumber: r.checkNumber,
+                    dateEntered: r.dateEntered ? r.dateEntered.toISOString().slice(0, 10) : "",
                     paymentDate: r.paymentDate ? r.paymentDate.toISOString().slice(0, 10) : "",
                     paymentAmount: r.paymentAmount,
                     facility: r.facility || "",
@@ -562,7 +654,7 @@ export default function PaymentsDashboard() {
                           </button>
                         </div>
                         <p className={`text-xs font-medium ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>or drag and drop</p>
-                        <p className={`text-xs mt-2 ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>Use "Collected Payments By Payment Date - Detail" CSV</p>
+                        <p className={`text-xs mt-2 ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>Supports: "Collected Payments" or "filtered_payments" CSV formats</p>
                       </div>
                     )}
                   </div>
@@ -764,7 +856,7 @@ export default function PaymentsDashboard() {
                   </p>
                 </div>
                 <div className={`rounded-lg p-3 border transition-colors ${darkMode ? 'bg-gray-700/50 border-gray-600' : 'bg-cyan-50 border-cyan-200'}`}>
-                  <p className={`text-xs font-medium ${darkMode ? 'text-cyan-300' : 'text-cyan-800'}`}>Payment Date Range</p>
+                  <p className={`text-xs font-medium ${darkMode ? 'text-cyan-300' : 'text-cyan-800'}`}>Date Entered Range</p>
                   <p className={`text-xs font-bold ${darkMode ? 'text-cyan-400' : 'text-cyan-600'}`}>
                     {dateRange ? `${dateRange.count} days` : 'N/A'}
                   </p>
@@ -776,7 +868,7 @@ export default function PaymentsDashboard() {
 
         <div className={`grid grid-cols-1 lg:grid-cols-3 gap-4 shadow-sm border rounded-lg p-4 transition-colors ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
           <div className="lg:col-span-2">
-            <h2 className={`font-medium mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Daily totals</h2>
+            <h2 className={`font-medium mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Daily totals (by Date Entered)</h2>
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={daily} margin={{ top: 10, right: 20, bottom: 60, left: 0 }}>
@@ -1019,13 +1111,50 @@ export default function PaymentsDashboard() {
             <table className="w-full text-sm">
               <thead>
                 <tr className={`${darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-                  <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payment ID</th>
+                  <th 
+                    className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'} cursor-pointer hover:bg-opacity-80 select-none`}
+                    onClick={() => handleSort('paymentId')}
+                  >
+                    <div className="flex items-center gap-1">
+                      Payment ID
+                      {sortBy === 'paymentId' && (
+                        <span className="text-xs">
+                          {sortDirection === 'asc' ? '↑' : '↓'}
+                        </span>
+                      )}
+                    </div>
+                  </th>
                   <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Facility</th>
                   <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payer Category</th>
                   <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payer</th>
                   <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payment Type</th>
                   <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Check #</th>
-                  <th className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Payment Date</th>
+                  <th 
+                    className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'} cursor-pointer hover:bg-opacity-80 select-none`}
+                    onClick={() => handleSort('dateEntered')}
+                  >
+                    <div className="flex items-center gap-1">
+                      Date Entered
+                      {sortBy === 'dateEntered' && (
+                        <span className="text-xs">
+                          {sortDirection === 'asc' ? '↑' : '↓'}
+                        </span>
+                      )}
+                    </div>
+                  </th>
+                  <th 
+                    className={`text-left p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'} cursor-pointer hover:bg-opacity-80 select-none`}
+                    onClick={() => handleSort('paymentDate')}
+                  >
+                    <div className="flex items-center gap-1">
+                      Payment Date
+                      {sortBy === 'paymentDate' && (
+                        <span className="text-xs">
+                          {sortDirection === 'asc' ? '↑' : '↓'}
+                        </span>
+                      )}
+                    </div>
+                  </th>
                   <th className={`text-right p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Amount</th>
                   <th className={`text-right p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Applied</th>
                   <th className={`text-right p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Unapplied</th>
@@ -1033,7 +1162,7 @@ export default function PaymentsDashboard() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((r, idx) => (
+                {sortedFiltered.map((r, idx) => (
                   <tr
                     key={`${r.paymentId}-${r.facility}-${idx}`}
                     className={`${darkMode ? 'border-gray-700' : 'border-gray-200'} border-t hover:bg-opacity-50 ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-50'}`}
@@ -1044,6 +1173,7 @@ export default function PaymentsDashboard() {
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.payer}</td>
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.paymentType}</td>
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.checkNumber}</td>
+                    <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.dateEntered ? r.dateEntered.toISOString().slice(0, 10) : ""}</td>
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.paymentDate ? r.paymentDate.toISOString().slice(0, 10) : ""}</td>
                     <td className={`p-2 text-right ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.paymentAmount.toFixed(2)}</td>
                     <td className={`p-2 text-right ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{Number.isFinite(r.appliedAmount) ? r.appliedAmount.toFixed(2) : ""}</td>
@@ -1051,9 +1181,9 @@ export default function PaymentsDashboard() {
                     <td className={`p-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>{r.notes}</td>
                   </tr>
                 ))}
-                {filtered.length === 0 && (
+                {sortedFiltered.length === 0 && (
                   <tr>
-                    <td colSpan="11" className={`p-4 text-center ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>No rows match your filters.</td>
+                    <td colSpan="12" className={`p-4 text-center ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>No rows match your filters.</td>
                   </tr>
                 )}
               </tbody>
